@@ -1,0 +1,489 @@
+#!/usr/bin/python3
+#
+# LXD-TOOLS:
+#   LXD Powertool by unendingPattern (https://github.com/unendingPattern/lxd-tools)
+#   You may use, distribute and modify this code under WTFPL.
+#
+# REQUIREMENTS:
+#   python3.x
+#   PrettyTable (pip3 install PrettyTable)
+#
+import os, sys, getopt, subprocess, shlex, json, time, re
+from collections import OrderedDict 
+from operator import getitem 
+from datetime import datetime
+from subprocess import Popen
+from prettytable import PrettyTable
+
+# Formatting for making the output look nice in terminal
+# (snippet taken from https://stackoverflow.com/a/17303428)
+class formatting:
+    PURPLE = '\033[95m'
+    CYAN = '\033[96m'
+    DARKCYAN = '\033[36m'
+    BLUE = '\033[94m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[33m'
+    LYELLOW = '\033[93m'
+    RED = '\033[91m'
+    BOLD = '\033[1m'
+    DIM = '\033[2m'
+    UNDERLINE = '\033[4m'
+    END = '\033[0m'
+
+# Run commands outputted by this script?
+# Set to 0 if you don't feel safe letting this script run commands on your LXD instance.
+runCommands = 1 # use with debug = 1 to get a list of commands if you wish to run them manually.
+
+# Print debug information (currently displays commands as they're being ran)
+debug = 0
+
+# Attempt to locate LXC (for LXD)
+whereisLXC = subprocess.getoutput('which lxc')
+if whereisLXC:
+    lxcPath = whereisLXC
+else:
+    lxcPath = "/var/lib/snapd/snap/bin/lxc" # Change this if your installation path is different! Must point to lxc! not lxd!
+
+# Check if LXC exists
+if not os.path.isfile(lxcPath):
+    print(formatting.BOLD + formatting.RED + "Couldn't find the LXC executable! Modify `lxcPath` in the script." + formatting.END)
+    sys.exit(2)
+
+# Bridge device
+lxdBridge = "lxdbr0"
+
+# Backups folder
+backupFolder = os.getcwd() + "/lxd-backups/"
+
+# Default sorting option (for the list command)
+# Available options: name, distro, status, ipv4, ipv6, snapshots, backups, lastSnapshot, lastBackup
+sortListBy = "ipv4"
+# Sort in reverse?
+sortListReverse = False
+
+# Check for command line arguments
+arguments = sys.argv[1:]
+
+# No arguments specified? Print help
+if not arguments:
+    arguments = ['help']
+
+# Use the LXC list command output in JSON (lxc list --format json)
+jsonCommand = " list --format json"
+jsonOutput = subprocess.getoutput(lxcPath + jsonCommand)
+containerList = json.loads(jsonOutput.lower())
+
+# Date / Time variables
+currentTime = time.strftime("%Y_%m_%d-%H_%M_%S")
+
+# Get container variables
+def getContainer(containerName):
+    for container in containerList:
+        if container['name'] == containerName:
+            return container
+
+def listContainerSnapshots(containerName):
+    snapTable = PrettyTable(['NAME', 'SNAPSHOT', 'DATE'])
+    for container in containerList:
+        if container['name'] == containerName:
+            if container['snapshots']:
+                for snapshot in container['snapshots']:
+                    snapTable.add_row([container['name'], snapshot['name'], datetime.strptime(snapshot['created_at'].upper().split(".", 1)[0], "%Y-%m-%dT%H:%M:%S")])
+    return snapTable
+
+# Do a container update
+def doContainerUpdate(containerName, containerDistro):
+    print(formatting.BOLD + formatting.LYELLOW + "# [UPDATE] " + formatting.END + "Updating " + containerName + formatting.DIM + " (" + containerDistro + ")" + formatting.END)
+    
+    # Figure out what distro the container is running
+    distroCommand = ""
+    if (containerDistro == "ubuntu") or (containerDistro == "debian") or (containerDistro == "devuan") or (containerDistro == "kali") or (containerDistro == "mint"):
+            distroCommand = "-- sh -c \"apt-get -y update && apt-get -y upgrade\""
+    if (containerDistro == "alpine") or (containerDistro == "alpinelinux"):
+            distroCommand = "-- ash -c \"apk update && apk upgrade\""
+    if containerDistro == "centos":
+            distroCommand = "-- sh -c \"yum -y update && yum -y upgrade\""
+    if containerDistro == "fedora":
+            distroCommand = "-- sh -c \"dnf -y update && dnf -y upgrade \""
+    if containerDistro == "archlinux":
+            distroCommand = "-- sh -c \"pacman -Syyu --noconfirm\""
+
+    # Run the command for the appropriate distro
+    updateCommand = lxcPath + " exec " + containerName + " " + distroCommand
+    if debug: print(formatting.DIM + updateCommand + formatting.END)
+
+    # Print the live output of the update command being ran
+    if runCommands: 
+        proc = Popen(shlex.split(updateCommand)) #, shell=True)
+        print(formatting.LYELLOW + formatting.DIM)
+        proc.communicate()
+        print(formatting.END)
+
+    print(formatting.BOLD + formatting.LYELLOW + "# [UPDATE] " + formatting.END + "Finished!")
+    #output = subprocess.getoutput(updateCommand)
+    #print(output)
+
+# Do a container snapshot
+def doContainerSnapshot(containerName):
+    print(formatting.BOLD + formatting.CYAN + "# [SNAPSHOT] " + formatting.END + "Creating snapshot of " + containerName)
+
+    # Print the live output of the snapshot command being ran
+    snapshotCommand = lxcPath + " snapshot " + containerName
+    if debug: print(formatting.DIM + snapshotCommand + formatting.END)
+    if runCommands:
+        proc = Popen(shlex.split(snapshotCommand))
+        proc.communicate()
+
+    # List snapshots with 'snap' in the name
+    snapshotListCommand = lxcPath + " info " + containerName + " | grep snap | awk '{print $1}'"
+    if runCommands: 
+        snapshotList = subprocess.getoutput(snapshotListCommand)
+        print(formatting.BOLD + "Snapshots for " + containerName + ":" + formatting.END)
+        print(formatting.CYAN + formatting.DIM + snapshotList + formatting.END)
+
+    print(formatting.BOLD + formatting.CYAN + "# [SNAPSHOT] " + formatting.END + "Finished!")
+
+# Do a container backup
+def doContainerBackup(containerName):
+    print(formatting.BOLD + formatting.GREEN + "# [BACKUP] " + formatting.END + "Creating backup of " + containerName)
+
+    snapshotName = "image-" + currentTime # example: image-2020_02_06-21_02_53
+    imageName = containerName + "-image-" + currentTime # example: mycontainer-image-2020_02_06-21_02_53
+
+    # Print the live output of the snapshot command being ran
+    snapshotCommand = lxcPath + " snapshot " + containerName + " " + snapshotName
+    if debug: print(formatting.DIM + snapshotCommand + formatting.END)
+    if runCommands: 
+        proc = Popen(shlex.split(snapshotCommand))
+        proc.communicate()
+
+    # List snapshots with 'image' in the name
+    snapshotListCommand = lxcPath + " info " + containerName + " | grep image | awk '{print $1}'"
+    if debug: print(formatting.DIM + snapshotListCommand + formatting.END)
+    if runCommands: 
+        snapshotList = subprocess.getoutput(snapshotListCommand)
+        print(formatting.BOLD + "Backup snapshot for " + containerName + ":" + formatting.END)
+        print(formatting.GREEN + formatting.DIM + snapshotList + formatting.END)
+
+    # Publish a snapshot as a container image
+    publishCommand = lxcPath + " publish --force " + containerName + "/" + snapshotName + " --alias " + imageName
+    if debug: print(formatting.DIM + publishCommand + formatting.END)
+    if runCommands: 
+        proc = Popen(shlex.split(publishCommand))
+        proc.communicate()
+
+    # Export the container image of the alias imageName from within LXD into a .tar.gz file
+    exportCommand = lxcPath + " image export " + imageName + " " + backupFolder + imageName
+    if debug: print(formatting.DIM + exportCommand + formatting.END)
+    if runCommands: 
+        proc = Popen(shlex.split(exportCommand))
+        proc.communicate()
+
+    # Delete the internal snapshot and image we created, whilst leaving behind the exported .tar.gz file
+    doSnapshotCleanup(containerName, snapshotName)
+    doImageCleanup(containerName + "-image-" + currentTime)
+
+    print(formatting.BOLD + formatting.GREEN + "# [BACKUP] " + formatting.END +  "Finished!")
+
+# Do container migration
+def doContainerMigration(containerName, newPool, newServer):
+    print(formatting.BOLD + formatting.YELLOW + "# [MIGRATE] " + formatting.END + "Migrating " + containerName + " to " + newPool + " on " + newServer)
+
+    snapshotName = "migrate-" + currentTime # example: migrate-2020_02_06-21_02_53
+
+    # Print the live output of the snapshot command being ran
+    snapshotCommand = lxcPath + " snapshot " + containerName + " " + snapshotName
+    print(formatting.BOLD + "Migration snapshot for " + containerName + ":" + formatting.END)
+    if debug: print(formatting.DIM + snapshotCommand + formatting.END)
+    if runCommands: 
+        proc = Popen(shlex.split(snapshotCommand))
+        proc.communicate()
+
+    # List snapshots with 'snap' in the name
+    snapshotListCommand = lxcPath + " info " + containerName + " | grep migrate | awk '{print $1}'"
+    if debug: print(formatting.DIM + snapshotListCommand + formatting.END)
+    if runCommands: 
+        snapshotList = subprocess.getoutput(snapshotListCommand)
+        print(formatting.YELLOW + formatting.DIM + snapshotList + formatting.END)
+
+    # Migrate the container to a storage pool on a different server
+    migrateCommand = lxcPath + " copy " + containerName + "/" + snapshotName + " " +newServer + ":" + containerName + " -s " + newPool
+    if debug: print(formatting.DIM + migrateCommand + formatting.END)
+    if runCommands: 
+        doMigration = subprocess.getoutput(migrateCommand)
+        print(formatting.YELLOW + formatting.DIM + doMigration + formatting.END)
+
+    doSnapshotCleanup(containerName, snapshotName)
+
+    print(formatting.BOLD + formatting.YELLOW + "# [MIGRATE] " + formatting.END + "Finished!")
+
+def doSetIPv4(containerName, IPv4):
+    print(formatting.BOLD + formatting.BLUE + "# [IPv4] " + formatting.END + "Setting IPv4 for " + containerName + " to " + IPv4)
+
+    checkIPv4 = re.compile("^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$")
+
+    if not (re.search(checkIPv4, IPv4)):
+        print(formatting.BOLD + formatting.BLUE + "# [IPv4] " + formatting.RED + "Invalid IPv4 address!" + formatting.END)
+        sys.exit(2)
+
+    # Attach the network device
+    attachCommand = lxcPath + " network attach " + lxdBridge + " " + containerName + " eth0 eth0"
+    if debug: print(formatting.DIM + attachCommand + formatting.END)
+    if runCommands: 
+        attachOutput = subprocess.getoutput(attachCommand)
+        print(formatting.BLUE + formatting.DIM + attachOutput + formatting.END)
+
+    # Set the IPv4
+    ipCommand = lxcPath + " config device set " + containerName + " eth0 ipv4.address " + IPv4
+    if debug: print(formatting.DIM + ipCommand + formatting.END)
+    if runCommands: 
+        ipOutput = subprocess.getoutput(ipCommand)
+        print(formatting.BLUE + formatting.DIM + ipOutput + formatting.END)
+
+    if getContainer(containerName)['status'] == "running":
+        print(formatting.DIM + "Remember to restart " + containerName + " for the changes to take effect!" + formatting.END)
+
+    print(formatting.BOLD + formatting.BLUE + "# [IPv4] " + formatting.END + "Finished!" + formatting.END)
+
+def doSnapshotCleanup(containerName, snapshotName):
+    print(formatting.BOLD + formatting.RED + "# [CLEANUP] " + formatting.END + "Cleaning up snapshot " + snapshotName + " of " + containerName)
+
+    # Delete the snapshot we created for the image
+    snapshotDeleteCommand = lxcPath + " delete " + containerName + "/" + snapshotName
+    if debug: print(formatting.DIM + snapshotDeleteCommand + formatting.END)
+    if runCommands: subprocess.getoutput(snapshotDeleteCommand)
+
+    print(formatting.BOLD + formatting.RED + "# [CLEANUP] " + formatting.END + "Finished!")
+
+def doImageCleanup(imageName):
+    print(formatting.BOLD + formatting.RED + "# [CLEANUP] " + formatting.END + "Cleaning up image " + imageName)
+
+    imageDeleteCommand = lxcPath + " image delete " + imageName
+    if debug: print(formatting.DIM + imageDeleteCommand + formatting.END)
+    if runCommands: subprocess.getoutput(imageDeleteCommand)
+
+    print(formatting.BOLD + formatting.RED + "# [CLEANUP] " + formatting.END + "Finished!")
+    
+def sortContainerDict(tup):
+    key, d = tup
+    return d["ipv4"], d["ipv4"]
+
+primaryArgument = arguments[0]
+secondaryArgument = arguments[1] if len(arguments) > 1 else ""
+tetriaryArgument = arguments[2] if len(arguments) > 2 else ""
+quaternaryArgument = arguments[3] if len(arguments) > 3 else ""
+
+# Display help
+if primaryArgument in ("help"):
+    helpOutput = """
+LXD UTILITY
+    Tested on LXD 3.20 running in Snap
+
+CONFIGURATION OPTIONS:
+    Modify the script to change these if required.
+            runCommands = 1
+            debug = 0
+            lxcPath = AUTOMATIC (defaults to "/var/lib/snapd/snap/bin/lxc" if not found)
+            lxdBridge = "lxdbr0"
+            backupFolder = os.getcwd() + "/lxd-backups/"
+            sortListBy = "ipv4"
+            sortListReverse = False
+
+PARAMETERS:
+lxd-tools
+            help
+            list [backups/snapshots]
+            update <container-name/ALL>
+            snapshot <container-name/ALL>
+            backup <container-name/ALL>
+            migrate <container-name/ALL> <storage-pool> <remote-name>
+            cleanup <snapshots/backups> <container-name/ALL>
+            set-ipv4 <container-name> <ipv4>
+
+AUTHOR
+    unendingPattern (https://unendingPattern.github.io/)
+
+LICENSE
+    WTFPL 3.0"""
+    print(helpOutput)
+    sys.exit()
+# Display lists
+elif primaryArgument in ("list"):
+    # List all the containers
+    if (secondaryArgument == "" or secondaryArgument == "containers"):
+        containerDict = {}
+        for container in containerList:
+            snapshotCount = 0
+            backupCount = 0
+            lastSnapshot = "N/A"
+            lastBackup = "N/A"
+            IPv4 = "N/A"
+            IPv6 = "N/A"
+            # Check if the container has an IP address
+            if container['state']['network']:
+                if container['state']['network']['eth0']:
+                    if container['state']['network']['eth0']['addresses'][0]['address']:
+                        IPv4 = container['state']['network']['eth0']['addresses'][0]['address']
+                    if container['state']['network']['eth0']['addresses'][1]['address']:
+                        IPv6 = container['state']['network']['eth0']['addresses'][1]['address']
+
+            # Check if container has any snapshots
+            if container['snapshots']:
+                for snapshot in container['snapshots']:
+                    snapshotCount = snapshotCount + 1
+                    lastSnapshot = datetime.strptime(snapshot['created_at'].upper().split(".", 1)[0], "%Y-%m-%dT%H:%M:%S")
+
+            # Count the amount of backups for this container
+            if os.path.isdir(backupFolder):
+                backupFiles = []
+                for r, d, f in os.walk(backupFolder):
+                    for backupFile in f:
+                        if container['name'] in backupFile:
+                            backupFiles.append(os.path.join(r, backupFile))
+                            lastBackup = datetime.fromtimestamp(os.path.getmtime(os.path.join(r, backupFile))).replace(microsecond=0)
+                backupCount = len(backupFiles)
+
+            containerDict[container['name']] = {}
+            containerDict[container['name']]['name'] = container['name']
+            containerDict[container['name']]['distro'] = container['config']['image.os']
+            containerDict[container['name']]['status'] = container['status']
+            containerDict[container['name']]['ipv4'] = IPv4
+            containerDict[container['name']]['ipv6'] = IPv6
+            containerDict[container['name']]['snapshots'] = snapshotCount
+            containerDict[container['name']]['backups'] = backupCount
+            containerDict[container['name']]['lastSnapshot'] = lastSnapshot
+            containerDict[container['name']]['lastBackup'] = lastBackup
+
+        # Sort the containers by IPv4
+        sortedContainerDict = OrderedDict(sorted(containerDict.items(), key = lambda x: getitem(x[1], sortListBy), reverse=sortListReverse))
+        # Create a list of all the containers within LXD and display it in a set of tables
+        # Set up the table and table headers
+        containerTable = PrettyTable(['NAME', 'DISTRO', 'IPv4', 'IPv6', 'STATUS', 'SNAPSHOTS', 'BACKUPS', 'LAST SNAPSHOT', 'LAST BACKUP'])
+        for container in sortedContainerDict.values():
+            # Add the containers as rows to the table
+            containerTable.add_row([container['name'], container['distro'], container['ipv4'], container['ipv6'], container['status'], container['snapshots'], container['backups'], container['lastSnapshot'],  container['lastBackup']])
+        # Display the container table
+        print(containerTable)
+    elif secondaryArgument == "snapshots":
+        snapTable = PrettyTable(['NAME', 'SNAPSHOT', 'DATE'])
+        for container in containerList:
+            if container['snapshots']:
+                for snapshot in container['snapshots']:
+                    snapTable.add_row([container['name'], snapshot['name'], datetime.strptime(snapshot['created_at'].upper().split(".", 1)[0], "%Y-%m-%dT%H:%M:%S")])
+        print(snapTable)
+    elif secondaryArgument == "backups":
+        backupTable = PrettyTable(['NAME', 'BACKUP', 'DATE'])
+        for container in containerList:
+            if os.path.isdir(backupFolder):
+                backupFiles = []
+                for r, d, f in os.walk(backupFolder):
+                    for backupFile in f:
+                        if container['name'] in backupFile:
+                            backupFiles.append(os.path.join(r, backupFile))
+                backupCount = len(backupFiles)
+                for backupFile in backupFiles:
+                    backupTable.add_row([container['name'], os.path.basename(backupFile), datetime.fromtimestamp(os.path.getmtime(backupFile)).replace(microsecond=0)])
+        print(backupTable)
+# Do a container snapshot
+elif primaryArgument in ("snapshot"):
+    # Snapshot all containers?
+    if secondaryArgument == "ALL":
+        print("Snapshotting all containers...")
+        for container in containerList:
+            doContainerSnapshot(container['name'])
+    # Snapshot a specific container?
+    else:
+        doContainerSnapshot(secondaryArgument)
+
+elif primaryArgument in ("backup"):
+    # Create the backups folder if it doesn't exist
+    if not os.path.isdir(backupFolder):
+        print(formatting.BOLD + "# [BACKUP] " + formatting.RED + "Couldn't find the backups folder as specified in `backupFolder`! Attempting to create it..." + formatting.END)
+        # Print the current working directory
+        print(formatting.DIM + "The current working directory is " + os.getcwd() + formatting.END)
+        # Attempt to create the backups folder
+        print(formatting.DIM + "Creating " + backupFolder + " ..." + formatting.END)
+        try:
+            os.mkdir(backupFolder)
+        except OSError:
+            print(formatting.BOLD + formatting.RED + "Creation of " + backupFolder + " failed!" + formatting.END)
+            sys.exit(2)
+        else:
+            print(formatting.DIM + formatting.GREEN + "Successfully created " + backupFolder  + formatting.END)
+    # Back up ALL containers?
+    if secondaryArgument == "ALL":
+        print(formatting.BOLD + "# [BACKUP] " + formatting.RED + "Backing up all containers...")
+        for container in containerList:
+            doContainerBackup(container['name'])
+    # Back up a specific container?
+    else:
+        doContainerBackup(secondaryArgument)
+
+elif primaryArgument in ("update"):
+    # Update ALL containers?
+    if secondaryArgument == "ALL":
+        print(formatting.BOLD + formatting.LYELLOW + "# [UPDATE] " + formatting.END + "Backing up all containers...")
+        for container in containerList:
+            # Perform the update commands on all running containers.
+            if container['status'] == "running":
+                doContainerUpdate(container['name'], container['config']['image.os'])
+    # Update a specific container?
+    else:
+        # Can't run update commands on a container which is not running.
+        if getContainer(secondaryArgument)['status'] == "running":
+            doContainerUpdate(secondaryArgument, getContainer(secondaryArgument)['config']['image.os'])
+        else:
+            print(formatting.BOLD + formatting.LYELLOW + "# [UPDATE] " + formatting.RED + secondaryArgument + " is not running.")
+elif primaryArgument in ("cleanup"):
+    # Clean up snapshots
+    if secondaryArgument == "snapshots":
+        if tetriaryArgument == "":
+            print(formatting.BOLD + formatting.RED + "# [CLEANUP] " + formatting.END + "Specify container name or \"ALL\"")
+            sys.exit(2)
+        for container in containerList:
+            if (tetriaryArgument == "ALL") or (container['name'] == tetriaryArgument):
+                if container['snapshots']:
+                    for snapshot in container['snapshots']:
+                        doSnapshotCleanup(container['name'], snapshot['name'])
+    elif secondaryArgument == "backups":
+        backupFiles = []
+        if tetriaryArgument == "":
+            print(formatting.BOLD + formatting.RED + "# [CLEANUP] " + formatting.END + "Specify container name or \"ALL\"")
+            sys.exit(2)
+        else:
+            if tetriaryArgument == "ALL":
+                toRemove = ".gz"
+            else:
+                toRemove = tetriaryArgument
+            if os.path.isdir(backupFolder):
+                for r, d, f in os.walk(backupFolder):
+                    for backupFile in f:
+                        if toRemove in backupFile:
+                            backupFiles.append(os.path.join(r, backupFile))
+            for backupFile in backupFiles:
+                print(formatting.BOLD + formatting.RED + "# [CLEANUP] " + formatting.END + "Removing " + os.path.basename(backupFile))
+                if runCommands:
+                    os.remove(backupFile)
+                else:
+                    print("rm -f " + backupFile)
+elif primaryArgument in ("set-ipv4"):
+    if tetriaryArgument == "":
+        print(formatting.BOLD + formatting.BLUE + "# [IPv4] " + formatting.END + "No IPv4 specified.")
+        sys.exit(2)
+    doSetIPv4(secondaryArgument, tetriaryArgument)
+elif primaryArgument in ("migrate"):
+    if tetriaryArgument == "":
+        print(formatting.BOLD + formatting.YELLOW + "# [MIGRATE] " + formatting.END + "No pool defined.")
+        sys.exit(2)
+    if quaternaryArgument == "":
+        print(formatting.BOLD + formatting.YELLOW + "# [MIGRATE] " + formatting.END + "No server defined.")
+        sys.exit(2)
+    # Migrate ALL containers?
+    if secondaryArgument == "ALL":
+        print(formatting.BOLD + formatting.YELLOW + "# [MIGRATE] " + formatting.END + "Migrating all containers to " + tetriaryArgument + " on " + quaternaryArgument)
+        for container in containerList:
+            doContainerMigration(container['name'], tetriaryArgument, quaternaryArgument)
+    # Migrate a specific container?
+    else:
+        doContainerMigration(secondaryArgument, tetriaryArgument, quaternaryArgument)
