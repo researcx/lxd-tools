@@ -58,13 +58,13 @@ set-ipv4 <container-name> <ipv4>
 * python3.x
 * PrettyTable
 
-```console
+```bash
 sudo pip3 install PrettyTable
 ```
 
 
 ### RUNNING:
-```console
+```bash
 chmod +x lxd-tools
 ./lxd-tools <parameters>
 ```
@@ -72,7 +72,7 @@ chmod +x lxd-tools
 
 ### INSTALLING TO SYSTEM:
 (OPTIONAL)
-```console
+```bash
 sudo pip3 install PrettyTable
 git clone https://github.com/unendingPattern/lxd-tools.git
 sudo cp -f lxd-tools/lxd-tools /usr/local/bin
@@ -80,7 +80,7 @@ sudo chmod +x /usr/local/bin/lxd-tools
 lxd-tools <parameters>
 ```
 OR
-```console
+```bash
 sudo pip3 install PrettyTable
 sudo wget -O /usr/local/bin/lxd-tools https://github.com/unendingPattern/lxd-tools/raw/master/lxd-tools
 sudo chmod +x /usr/local/bin/lxd-tools
@@ -90,11 +90,11 @@ lxd-tools <parameters>
 
 ### USING WITH CRONTAB:
 Backup all containers at midnight:
-```console
+```bash
 0 0 * * * path/to/lxd-tools backup ALL
 ```
 Backup a specific container at 04:05 AM:
-```console
+```bash
 5 4 * * * path/to/lxd-tools backup specific-container
 ```
 
