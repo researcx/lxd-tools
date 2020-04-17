@@ -38,12 +38,9 @@ runCommands = 1 # use with debug = 1 to get a list of commands if you wish to ru
 # Print debug information (currently displays commands as they're being ran)
 debug = 0
 
-# Attempt to locate LXC (for LXD)
-whereisLXC = subprocess.getoutput('which lxc')
-if whereisLXC:
-    lxcPath = whereisLXC
-else:
-    lxcPath = "/var/lib/snapd/snap/bin/lxc" # Change this if your installation path is different! Must point to lxc! not lxd!
+# IMPORTANT:
+# Change this if your installation path is different! Must point to LXC! not LXD!
+lxcPath = "/snap/bin/lxc"
 
 # Check if LXC exists
 if not os.path.isfile(lxcPath):
@@ -423,7 +420,7 @@ elif primaryArgument in ("backup"):
 elif primaryArgument in ("update"):
     # Update ALL containers?
     if secondaryArgument == "ALL":
-        print(formatting.BOLD + formatting.LYELLOW + "# [UPDATE] " + formatting.END + "Backing up all containers...")
+        print(formatting.BOLD + formatting.LYELLOW + "# [UPDATE] " + formatting.END + "Updating all running containers...")
         for container in containerList:
             # Perform the update commands on all running containers.
             if container['status'] == "running":

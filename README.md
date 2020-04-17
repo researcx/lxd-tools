@@ -28,7 +28,7 @@ Want to add your own? See: `distroCommand`
 
     runCommands = 1
     debug = 0
-    lxcPath = `which lxc` or "/var/lib/snapd/snap/bin/lxc"
+    lxcPath = "/snap/bin/lxc" # YOU WILL MOST LIKELY NEED TO CHANGE THIS
     lxdBridge = "lxdbr0"
     backupFolder = CURRENT WORKING DIRECTORY + "/lxd-backups/"
     sortListBy = "ipv4"
